@@ -7,22 +7,32 @@ import pickle
 import os
 
 
-def get_cifar10(root='data/datasets', n_lbl=4000, ssl_idx=None, pseudo_lbl=None, itr=0, split_txt=''):
+def get_cifar10(root='data/datasets', n_lbl=4000, ssl_idx=None, pseudo_lbl=None, itr=0, split_txt='', args=None):
     os.makedirs(root, exist_ok=True) #create the root directory for saving data
     # augmentations
-    transform_train = transforms.Compose([
-        RandAugment(3,4),  #from https://arxiv.org/pdf/1909.13719.pdf. For CIFAR-10 M=3, N=4
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
-        transforms.ColorJitter(
-            brightness=0.4,
-            contrast=0.4,
-            saturation=0.4,
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.4914, 0.4822, 0.4465), std=(0.2471, 0.2435, 0.2616)),
-        CutoutRandom(n_holes=1, length=16, random=True)
-    ])
+    if args.no_augmentation:
+        print('Disabled RandAugmentation..')
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.4914, 0.4822, 0.4465), std=(0.2471, 0.2435, 0.2616)),
+        ])
+    else:
+        print('Use RandAugmentation..')
+        transform_train = transforms.Compose([
+            RandAugment(3,4),  #from https://arxiv.org/pdf/1909.13719.pdf. For CIFAR-10 M=3, N=4
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
+            transforms.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.4914, 0.4822, 0.4465), std=(0.2471, 0.2435, 0.2616)),
+            CutoutRandom(n_holes=1, length=16, random=True)
+        ])
     
     transform_val = transforms.Compose([
         transforms.ToTensor(),
@@ -30,7 +40,7 @@ def get_cifar10(root='data/datasets', n_lbl=4000, ssl_idx=None, pseudo_lbl=None,
     ])
 
     if ssl_idx is None:
-        base_dataset = datasets.CIFAR10(root, train=True, download=True)
+        base_dataset = datasets.CIFAR10(root, train=True, download=False)
         train_lbl_idx, train_unlbl_idx = lbl_unlbl_split(base_dataset.targets, n_lbl, 10)
         
         os.makedirs('data/splits', exist_ok=True)
@@ -52,16 +62,18 @@ def get_cifar10(root='data/datasets', n_lbl=4000, ssl_idx=None, pseudo_lbl=None,
         nl_mask = pseudo_lbl_dict['nl_mask']
         lbl_idx = np.array(lbl_idx + pseudo_idx)
 
-        #balance the labeled and unlabeled data 
-        if len(nl_idx) > len(lbl_idx):
-            exapand_labeled = len(nl_idx) // len(lbl_idx)
-            lbl_idx = np.hstack([lbl_idx for _ in range(exapand_labeled)])
+        #balance the labeled and unlabeled data  -- I feel this is incorrect
+        # balance the positive + labeled and negative data?
+        # But why negative data can be more than the positive + labeled ones?
+        if nl_idx is not None and len(nl_idx) > len(lbl_idx):
+                exapand_labeled = len(nl_idx) // len(lbl_idx)
+                lbl_idx = np.hstack([lbl_idx for _ in range(exapand_labeled)])
 
-            if len(lbl_idx) < len(nl_idx):
-                diff = len(nl_idx) - len(lbl_idx)
-                lbl_idx = np.hstack((lbl_idx, np.random.choice(lbl_idx, diff)))
-            else:
-                assert len(lbl_idx) == len(nl_idx)
+                if len(lbl_idx) < len(nl_idx):
+                    diff = len(nl_idx) - len(lbl_idx)
+                    lbl_idx = np.hstack((lbl_idx, np.random.choice(lbl_idx, diff)))
+                else:
+                    assert len(lbl_idx) == len(nl_idx)
     else:
         pseudo_idx = None
         pseudo_target = None
@@ -82,29 +94,39 @@ def get_cifar10(root='data/datasets', n_lbl=4000, ssl_idx=None, pseudo_lbl=None,
     train_unlbl_dataset = CIFAR10SSL(
     root, train_unlbl_idx, train=True, transform=transform_val)
 
-    test_dataset = datasets.CIFAR10(root, train=False, transform=transform_val, download=True)
+    test_dataset = datasets.CIFAR10(root, train=False, transform=transform_val, download=False)
 
     if nl_idx is not None:
         return train_lbl_dataset, train_nl_dataset, train_unlbl_dataset, test_dataset
     else:
-        return train_lbl_dataset, train_unlbl_dataset, train_unlbl_dataset, test_dataset
+        return train_lbl_dataset, None, train_unlbl_dataset, test_dataset
 
 
 def get_cifar100(root='data/datasets', n_lbl=10000, ssl_idx=None, pseudo_lbl=None, itr=0, split_txt=''):
     ## augmentations
-    transform_train = transforms.Compose([
-        RandAugment(3,4),  #from https://arxiv.org/pdf/1909.13719.pdf. For CIFAR-10 M=3, N=4
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
-        transforms.ColorJitter(
-            brightness=0.4,
-            contrast=0.4,
-            saturation=0.4,
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761)),
-        CutoutRandom(n_holes=1, length=16, random=True)
-    ])
+    if args.no_augmentation:
+        print('Disabled RandAugmentation..')
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761)),
+        ])
+    else:
+        print('Use RandAugmentation..')
+        transform_train = transforms.Compose([
+            RandAugment(3,4),  #from https://arxiv.org/pdf/1909.13719.pdf. For CIFAR-10 M=3, N=4
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(size=32, padding=int(32*0.125), padding_mode='reflect'),
+            transforms.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761)),
+            CutoutRandom(n_holes=1, length=16, random=True)
+        ])
     
     transform_val = transforms.Compose([
         transforms.ToTensor(),
@@ -112,7 +134,7 @@ def get_cifar100(root='data/datasets', n_lbl=10000, ssl_idx=None, pseudo_lbl=Non
     ])
 
     if ssl_idx is None:
-        base_dataset = datasets.CIFAR100(root, train=True, download=True)
+        base_dataset = datasets.CIFAR100(root, train=True, download=False)
         train_lbl_idx, train_unlbl_idx = lbl_unlbl_split(base_dataset.targets, n_lbl, 100)
         
         f = open(os.path.join('data/splits', f'cifar100_basesplit_{n_lbl}_{split_txt}.pkl'),"wb")
@@ -163,7 +185,7 @@ def get_cifar100(root='data/datasets', n_lbl=10000, ssl_idx=None, pseudo_lbl=Non
     train_unlbl_dataset = CIFAR100SSL(
     root, train_unlbl_idx, train=True, transform=transform_val)
 
-    test_dataset = datasets.CIFAR100(root, train=False, transform=transform_val, download=True)
+    test_dataset = datasets.CIFAR100(root, train=False, transform=transform_val, download=False)
 
     if nl_idx is not None:
         return train_lbl_dataset, train_nl_dataset, train_unlbl_dataset, test_dataset
@@ -187,7 +209,7 @@ def lbl_unlbl_split(lbls, n_lbl, n_class):
 class CIFAR10SSL(datasets.CIFAR10):
     def __init__(self, root, indexs, train=True,
                  transform=None, target_transform=None,
-                 download=True, pseudo_idx=None, pseudo_target=None,
+                 download=False, pseudo_idx=None, pseudo_target=None,
                  nl_idx=None, nl_mask=None):
         super().__init__(root, train=train,
                          transform=transform,
@@ -229,7 +251,7 @@ class CIFAR10SSL(datasets.CIFAR10):
 class CIFAR100SSL(datasets.CIFAR100):
     def __init__(self, root, indexs, train=True,
                  transform=None, target_transform=None,
-                 download=True, pseudo_idx=None, pseudo_target=None,
+                 download=False, pseudo_idx=None, pseudo_target=None,
                  nl_idx=None, nl_mask=None):
         super().__init__(root, train=train,
                          transform=transform,
