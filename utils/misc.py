@@ -4,10 +4,32 @@
 import logging
 
 import torch
+import os
+import sys
+import shutil
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['get_mean_and_std', 'accuracy', 'AverageMeter']
+__all__ = ['get_mean_and_std', 'accuracy', 'AverageMeter', 'get_lr', 'check_path']
+
+
+def check_path(path):
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    else:
+        option = input('Path %s already exists. Delete[d], Terminate[*]? ' % path)
+        if option.lower() == 'd':
+            shutil.rmtree(path)
+            os.makedirs(path)
+        else:
+            print('Terminated.')
+            sys.exit(2)
+
+
+def get_lr(optimizer):
+    lrs = [param_group['lr'] for param_group in optimizer.param_groups]
+    assert(len(lrs) == 1)
+    return lrs[0]
 
 
 def get_mean_and_std(dataset):
@@ -34,11 +56,11 @@ def accuracy(output, target, topk=(1,)):
 
     _, pred = output.topk(maxk, 1, True, True)
     pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0)
+        correct_k = correct[:k].reshape(-1).float().sum(0)
         try:
             res.append(correct_k.mul_(100.0 / batch_size))
         except:
