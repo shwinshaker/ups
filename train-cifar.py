@@ -35,14 +35,27 @@ def main():
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=8,
                         help='number of workers')
-    parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
-                        help='dataset names')
-    parser.add_argument('--n-lbl', type=int, default=4000,
-                        help='number of labeled data')
+    parser.add_argument('--resume', default='', type=str,
+                        help='path to latest checkpoint (default: none)')
+    parser.add_argument('--seed', type=int, default=-1,
+                        help="random seed (-1: don't use random seed)")
+    parser.add_argument('--no-progress', action='store_true',
+                        help="don't use progress bar")
+
+    # data and model
+    parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'cifar100'], help='dataset names')
+    parser.add_argument('--n-lbl', type=int, default=4000, help='number of labeled data')
     parser.add_argument('--arch', default='cnn13', type=str,
                         choices=['wideresnet', 'cnn13', 'shakeshake'],
                         help='architecture name')
+    parser.add_argument('--model-width', default=2, type=int,
+                        help='model width for WRN-28')
+    parser.add_argument('--model-depth', default=28, type=int,
+                        help='model depth for WRN')
+    parser.add_argument('--num-classes', default=10, type=int,
+                        help='total classes')
+
+    # training setting
     parser.add_argument('--iterations', default=20, type=int,
                         help='number of total pseudo-labeling iterations to run')
     parser.add_argument('--epchs', default=1024, type=int,
@@ -59,36 +72,36 @@ def main():
                         help='weight decay')
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
-    parser.add_argument('--resume', default='', type=str,
-                        help='path to latest checkpoint (default: none)')
-    parser.add_argument('--seed', type=int, default=-1,
-                        help="random seed (-1: don't use random seed)")
-    parser.add_argument('--no-progress', action='store_true',
-                        help="don't use progress bar")
+                        ## -- we don't have this in our bootstrapping (SGD's nesterov is by default False)
     parser.add_argument('--dropout', default=0.3, type=float,
                         help='dropout probs')
-    parser.add_argument('--num-classes', default=10, type=int,
-                        help='total classes')
+                        ## -- we don't have this in our bootstrapping
+
+    # pseudo-labeling
     parser.add_argument('--class-blnc', default=10, type=int,
-                        help='total number of class balanced iterations')
+                        # help='total number of class balanced iterations. If > num_iter, then class_balanced selection will be always used')
+                        help='number of the first several iterations where class-balance is enforced')
+                        ## -- we don't have this in our bootstrapping
     parser.add_argument('--tau-p', default=0.70, type=float,
                         help='confidece threshold for positive pseudo-labels, default 0.70')
-    parser.add_argument('--tau-n', default=0.05, type=float,
-                        help='confidece threshold for negative pseudo-labels, default 0.05')
+
+    parser.add_argument('--no-uncertainty', action='store_true',
+                        help='use uncertainty in the pesudo-label selection, default true')
     parser.add_argument('--kappa-p', default=0.05, type=float,
                         help='uncertainty threshold for positive pseudo-labels, default 0.05')
+
+    parser.add_argument('--no-negative-learning', action='store_true',
+                        help='use negative learning, default True')
+    parser.add_argument('--tau-n', default=0.05, type=float,
+                        help='confidece threshold for negative pseudo-labels, default 0.05')
     parser.add_argument('--kappa-n', default=0.005, type=float,
                         help='uncertainty threshold for negative pseudo-labels, default 0.005')
     parser.add_argument('--temp-nl', default=2.0, type=float,
                         help='temperature for generating negative pseduo-labels, default 2.0')
-    parser.add_argument('--no-uncertainty', action='store_true',
-                        help='use uncertainty in the pesudo-label selection, default true')
+
+    # profiling
     parser.add_argument('--split-txt', default='run1', type=str,
                         help='extra text to differentiate different experiments. it also creates a new labeled/unlabeled split')
-    parser.add_argument('--model-width', default=2, type=int,
-                        help='model width for WRN-28')
-    parser.add_argument('--model-depth', default=28, type=int,
-                        help='model depth for WRN')
     parser.add_argument('--test-freq', default=10, type=int,
                         help='frequency of evaluations')
     
@@ -219,7 +232,10 @@ def main():
             if itr == 0:
                 train_loss = train_initial(args, lbl_loader, model, optimizer, scheduler, epoch, itr)
             else:
-                train_loss = train_regular(args, lbl_loader, nl_loader, model, optimizer, scheduler, epoch, itr)
+                if args.no_negative_learning:
+                    train_loss = train_initial(args, lbl_loader, model, optimizer, scheduler, epoch, itr)
+                else:
+                    train_loss = train_regular(args, lbl_loader, nl_loader, model, optimizer, scheduler, epoch, itr)
 
             test_loss = 0.0
             test_acc = 0.0
