@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from datetime import datetime
 from data.cifar import get_cifar10, get_cifar100
@@ -26,14 +26,19 @@ from utils.train_util import train_initial, train_regular
 from utils.evaluate import test
 from utils.pseudo_labeling_util import pseudo_labeling
 
+# my stuff
+from utils.misc import get_lr
+from utils.logger import Logger
+from utils.misc import check_path
+
 
 def main():
-    run_started = datetime.today().strftime('%d-%m-%y_%H%M') #start time to create unique experiment name
+    # run_started = datetime.today().strftime('%d-%m-%y_%H%M') #start time to create unique experiment name
     parser = argparse.ArgumentParser(description='UPS Training')
     parser.add_argument('--out', default=f'outputs', help='directory to output the result')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
-    parser.add_argument('--num-workers', type=int, default=8,
+    parser.add_argument('--num-workers', type=int, default=16,
                         help='number of workers')
     parser.add_argument('--resume', default='', type=str,
                         help='path to latest checkpoint (default: none)')
@@ -73,9 +78,10 @@ def main():
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
                         ## -- we don't have this in our bootstrapping (SGD's nesterov is by default False)
-    parser.add_argument('--dropout', default=0.3, type=float,
+    parser.add_argument('--dropout', default=0., type=float,
                         help='dropout probs')
                         ## -- we don't have this in our bootstrapping
+    parser.add_argument('--no-augmentation', action='store_true', help='use random augmentation and cutout')
 
     # pseudo-labeling
     parser.add_argument('--class-blnc', default=10, type=int,
@@ -116,15 +122,37 @@ def main():
     print(f'number of epochs:                         {args.epchs}')
     print(f'batch size:                               {args.batchsize}')
     print(f'lr:                                       {args.lr}')
+    if args.dropout > 0:
+        print(f'dropout:                                       {args.dropout}')
     print(f'value of tau_p:                           {args.tau_p}')
-    print(f'value of tau_n:                           {args.tau_n}')
-    print(f'value of kappa_p:                         {args.kappa_p}')
-    print(f'value of kappa_n:                         {args.kappa_n}')
+    if not args.no_uncertainty:
+        print(f'Enabled Uncertainty.')
+        print(f'value of kappa_p:                         {args.kappa_p}')
+    if not args.no_negative_learning:
+        print(f'Enabled Negative learning.')
+        print(f'value of tau_n:                           {args.tau_n}')
+        if not args.no_uncertainty:
+            print(f'value of kappa_n:                         {args.kappa_n}')
     print('########################################################################')
     print('########################################################################')
 
     DATASET_GETTERS = {'cifar10': get_cifar10, 'cifar100': get_cifar100}
-    exp_name = f'exp_{args.dataset}_{args.n_lbl}_{args.arch}_{args.split_txt}_{args.epchs}_{args.class_blnc}_{args.tau_p}_{args.tau_n}_{args.kappa_p}_{args.kappa_n}_{run_started}'
+    # exp_name = f'exp_{args.dataset}_{args.n_lbl}_{args.arch}_{args.split_txt}_{args.epchs}_{args.class_blnc}_{args.tau_p}_{args.tau_n}_{args.kappa_p}_{args.kappa_n}_{run_started}'
+    exp_name = f'{args.dataset}'
+    exp_name += '_%s-%i-%i' % ({'wideresnet': 'wrn'}.get(args.arch), args.model_depth, args.model_width)
+    if args.dropout > 0:
+        exp_name += f'_dropout={args.dropout:g}'
+    if args.no_augmentation:
+        exp_name += '_no_aug'
+    exp_name += f'_size={args.n_lbl}'
+    exp_name += f'_epoch={args.epchs}'
+    exp_name += f'_iter={args.iterations}'
+    exp_name += f'_balanced_iter={args.class_blnc}'
+    exp_name += f'_conf_th={args.tau_p}'
+    if not args.no_uncertainty:
+        exp_name += f'_uncertainty_th={args.kappa_p}'
+        #TODO: # _{args.tau_n}_{args.kappa_n}'
+    exp_name += f'_{args.split_txt}'
     device = torch.device('cuda', args.gpu_id)
     args.device = device
     args.exp_name = exp_name
@@ -132,22 +160,35 @@ def main():
     if args.seed != -1:
         set_seed(args)
     args.out = os.path.join(args.out, args.exp_name)
-    start_itr = 0
 
+    start_itr = 0
     if args.resume and os.path.isdir(args.resume):
         resume_files = os.listdir(args.resume)
         resume_itrs = [int(item.replace('.pkl','').split("_")[-1]) for item in resume_files if 'pseudo_labeling_iteration' in item]
         if len(resume_itrs) > 0:
             start_itr = max(resume_itrs)
         args.out = args.resume
-    os.makedirs(args.out, exist_ok=True)
-    writer = SummaryWriter(args.out)
+    check_path(args.out)
+    # os.makedirs(args.out, exist_ok=True)
+    # writer = SummaryWriter(args.out)
+
+    # training logger
+    logger = Logger(os.path.join(args.out, 'log.txt'), title='log')
+    logger.set_names(['Iteration', 'Epoch', 'lr', 'Time-elapse(Min)',
+                      'Train-Loss', 'Test-Loss', 'Train-Acc', 'Test-Acc'])
+    # pl logger
+    logger_pl = Logger(os.path.join(args.out, 'log_pl.txt'), title='log pseudo label')
+    names = ['Iteration', 'Unlabeled-Loss', 'Unlabeled-Acc', 'Selected-PL-Acc', 'Selected-PL-Size']
+    if not args.no_negative_learning:
+        names.extend(['Negative-PL-Acc', 'Negative-PL-Size', 'Unique-Negative-Samples'])
+    logger_pl.set_names(names)
 
     if args.dataset == 'cifar10':
         args.num_classes = 10
     elif args.dataset == 'cifar100':
         args.num_classes = 100
     
+    time_start = time.time()
     for itr in range(start_itr, args.iterations):
         if itr == 0 and args.n_lbl < 4000: #use a smaller batchsize to increase the number of iterations
             args.batch_size = 64
@@ -168,19 +209,23 @@ def main():
             pseudo_lbl_dict = None
         
         lbl_dataset, nl_dataset, unlbl_dataset, test_dataset = DATASET_GETTERS[args.dataset]('data/datasets', args.n_lbl,
-                                                                lbl_unlbl_split, pseudo_lbl_dict, itr, args.split_txt)
+                                                                lbl_unlbl_split, pseudo_lbl_dict, itr, args.split_txt, args=args)
 
         model = create_model(args)
         model.to(args.device)
 
-        nl_batchsize = int((float(args.batch_size) * len(nl_dataset))/(len(lbl_dataset) + len(nl_dataset)))
+        if nl_dataset is not None:
+            # distribute the batch size based on the ratio between numbers of postive and negative pseudo-labels
+            nl_batchsize = int((float(args.batch_size) * len(nl_dataset))/(len(lbl_dataset) + len(nl_dataset)))
 
-        if itr == 0:
+        if itr == 0 or nl_dataset is None:
             lbl_batchsize = args.batch_size
             args.iteration = len(lbl_dataset) // args.batch_size
         else:
             lbl_batchsize = args.batch_size - nl_batchsize
             args.iteration = (len(lbl_dataset) + len(nl_dataset)) // args.batch_size
+
+        print('Labeled size: %i -- unlabeled sizes: %i' % (len(lbl_dataset), len(unlbl_dataset)))
 
         lbl_loader = DataLoader(
             lbl_dataset,
@@ -189,12 +234,13 @@ def main():
             num_workers=args.num_workers,
             drop_last=True)
 
-        nl_loader = DataLoader(
-            nl_dataset,
-            sampler=RandomSampler(nl_dataset),
-            batch_size=nl_batchsize,
-            num_workers=args.num_workers,
-            drop_last=True)
+        if nl_dataset is not None:
+            nl_loader = DataLoader(
+                nl_dataset,
+                sampler=RandomSampler(nl_dataset),
+                batch_size=nl_batchsize,
+                num_workers=args.num_workers,
+                drop_last=True)
 
         test_loader = DataLoader(
             test_dataset,
@@ -205,7 +251,7 @@ def main():
         unlbl_loader = DataLoader(
             unlbl_dataset,
             sampler=SequentialSampler(unlbl_dataset),
-            batch_size=args.batch_size,
+            batch_size=args.batch_size * 4,
             num_workers=args.num_workers)
 
         optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=args.nesterov)
@@ -237,17 +283,23 @@ def main():
                 else:
                     train_loss = train_regular(args, lbl_loader, nl_loader, model, optimizer, scheduler, epoch, itr)
 
-            test_loss = 0.0
-            test_acc = 0.0
+            test_loss = np.nan # 0.0
+            test_acc = np.nan # 0.0
             test_model = model
-            if epoch > (args.epochs+1)/2 and epoch%args.test_freq==0:
+            # if epoch > (args.epochs+1)/2 and epoch%args.test_freq==0:
+            if epoch % args.test_freq==0:
                 test_loss, test_acc = test(args, test_loader, test_model)
             elif epoch == (args.epochs-1):
                 test_loss, test_acc = test(args, test_loader, test_model)
 
-            writer.add_scalar('train/1.train_loss', train_loss, (itr*args.epochs)+epoch)
-            writer.add_scalar('test/1.test_acc', test_acc, (itr*args.epochs)+epoch)
-            writer.add_scalar('test/2.test_loss', test_loss, (itr*args.epochs)+epoch)
+            # writer.add_scalar('train/1.train_loss', train_loss, (itr*args.epochs)+epoch)
+            # writer.add_scalar('test/1.test_acc', test_acc, (itr*args.epochs)+epoch)
+            # writer.add_scalar('test/2.test_loss', test_loss, (itr*args.epochs)+epoch)
+    
+            logs = [itr, epoch, get_lr(optimizer), (time.time() - time_start)/60]
+            logs += [train_loss, test_loss,
+                     0, test_acc]
+            logger.append(logs)
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)
@@ -266,26 +318,42 @@ def main():
         model.zero_grad()
 
         #pseudo-label generation and selection
-        pl_loss, pl_acc, pl_acc_pos, total_sel_pos, pl_acc_neg, total_sel_neg, unique_sel_neg, pseudo_label_dict = pseudo_labeling(args, unlbl_loader, model, itr)
+        if args.no_negative_learning:
+            pl_loss, pl_acc, pl_acc_pos, total_sel_pos, pseudo_label_dict = pseudo_labeling(args, unlbl_loader, model, itr)
+        else:
+            pl_loss, pl_acc, pl_acc_pos, total_sel_pos, pl_acc_neg, total_sel_neg, unique_sel_neg, pseudo_label_dict = pseudo_labeling(args, unlbl_loader, model, itr)
 
-        writer.add_scalar('pseudo_labeling/1.regular_loss', pl_loss, itr)
-        writer.add_scalar('pseudo_labeling/2.regular_acc', pl_acc, itr)
-        writer.add_scalar('pseudo_labeling/3.pseudo_acc_positive', pl_acc_pos, itr)
-        writer.add_scalar('pseudo_labeling/4.total_sel_positive', total_sel_pos, itr)
-        writer.add_scalar('pseudo_labeling/5.pseudo_acc_negative', pl_acc_neg, itr)
-        writer.add_scalar('pseudo_labeling/6.total_sel_negative', total_sel_neg, itr)
-        writer.add_scalar('pseudo_labeling/7.unique_samples_negative', unique_sel_neg, itr)
+        # writer.add_scalar('pseudo_labeling/1.regular_loss', pl_loss, itr)
+        # writer.add_scalar('pseudo_labeling/2.regular_acc', pl_acc, itr)
+        # writer.add_scalar('pseudo_labeling/3.pseudo_acc_positive', pl_acc_pos, itr)
+        # writer.add_scalar('pseudo_labeling/4.total_sel_positive', total_sel_pos, itr)
+        logs = [itr, pl_loss, pl_acc, pl_acc_pos, total_sel_pos]
+        if not args.no_negative_learning:
+            # writer.add_scalar('pseudo_labeling/5.pseudo_acc_negative', pl_acc_neg, itr)
+            # writer.add_scalar('pseudo_labeling/6.total_sel_negative', total_sel_neg, itr)
+            # writer.add_scalar('pseudo_labeling/7.unique_samples_negative', unique_sel_neg, itr)
+            logs.extend([pl_acc_neg, total_sel_neg, unique_sel_neg])
+        logger_pl.append(logs)
 
         with open(os.path.join(args.out, f'pseudo_labeling_iteration_{str(itr+1)}.pkl'),"wb") as f:
             pickle.dump(pseudo_label_dict,f)
         
-        with open(os.path.join(args.out, 'log.txt'), 'a+') as ofile:
-            ofile.write(f'############################# PL Iteration: {itr+1} #############################\n')
-            ofile.write(f'Last Test Acc: {test_acc}, Best Test Acc: {best_acc}\n')
-            ofile.write(f'PL Acc (Positive): {pl_acc_pos}, Total Selected (Positive): {total_sel_pos}\n')
-            ofile.write(f'PL Acc (Negative): {pl_acc_neg}, Total Selected (Negative): {total_sel_neg}, Unique Negative Samples: {unique_sel_neg}\n\n')
+        # with open(os.path.join(args.out, 'log.txt'), 'a+') as ofile:
+        #     ofile.write(f'############################# PL Iteration: {itr+1} #############################\n')
+        #     ofile.write(f'Last Test Acc: {test_acc}, Best Test Acc: {best_acc}\n')
+        #     ofile.write(f'PL Acc (Positive): {pl_acc_pos}, Total Selected (Positive): {total_sel_pos}\n')
+        #     if not args.no_negative_learning:
+        #         ofile.write(f'PL Acc (Negative): {pl_acc_neg}, Total Selected (Negative): {total_sel_neg}, Unique Negative Samples: {unique_sel_neg}\n\n')
 
-    writer.close()
+        print(f'############################# PL Iteration: {itr+1} #############################')
+        print(f'Last Test Acc: {test_acc:.2f}, Best Test Acc: {best_acc:.2f}')
+        print(f'PL Acc (Positive): {pl_acc_pos:.2f}, Total Selected (Positive): {total_sel_pos}')
+        if not args.no_negative_learning:
+            print(f'PL Acc (Negative): {pl_acc_neg:.2f}, Total Selected (Negative): {total_sel_neg}, Unique Negative Samples: {unique_sel_neg}', end='\n\n')
+
+    # writer.close()
+    logger.close()
+    logger_pl.close()
 
 
 if __name__ == '__main__':
