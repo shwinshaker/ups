@@ -19,6 +19,7 @@ def pseudo_labeling(args, data_loader, model, itr):
     pseudo_idx = []
     pseudo_target = []
     pseudo_maxstd = []
+    pseudo_confidence = []
     gt_target = []
     idx_list = []
     gt_list = []
@@ -75,11 +76,12 @@ def pseudo_labeling(args, data_loader, model, itr):
 
             pseudo_maxstd.extend(max_std.squeeze(1)[selected_idx].cpu().numpy().tolist())
             pseudo_target.extend(max_idx[selected_idx].cpu().numpy().tolist())
+            pseudo_confidence.extend(max_value[selected_idx].cpu().numpy().tolist())
             pseudo_idx.extend(indexs[selected_idx].numpy().tolist())
             gt_target.extend(targets[selected_idx].cpu().numpy().tolist())
 
             loss = F.cross_entropy(outputs, targets.to(dtype=torch.long))
-            prec1, prec5 = accuracy(outputs[selected_idx], targets[selected_idx], topk=(1, 5))
+            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
 
             losses.update(loss.item(), inputs.shape[0])
             top1.update(prec1.item(), inputs.shape[0])
@@ -100,6 +102,7 @@ def pseudo_labeling(args, data_loader, model, itr):
             data_loader.close()
 
     pseudo_target = np.array(pseudo_target)
+    pseudo_confidence = np.array(pseudo_confidence)
     gt_target = np.array(gt_target)
     pseudo_maxstd = np.array(pseudo_maxstd)
     pseudo_idx = np.array(pseudo_idx)
@@ -126,34 +129,46 @@ def pseudo_labeling(args, data_loader, model, itr):
         pseudo_target = pseudo_target[blnc_idx_list]
         pseudo_idx = pseudo_idx[blnc_idx_list]
         gt_target = gt_target[blnc_idx_list]
+        pseudo_confidence = pseudo_confidence[blnc_idx_list]
 
     pseudo_labeling_acc = (pseudo_target == gt_target)*1
     pseudo_labeling_acc = (sum(pseudo_labeling_acc)/len(pseudo_labeling_acc))*100
     print(f'Pseudo-Labeling Accuracy (positive): {pseudo_labeling_acc}, Total Selected: {len(pseudo_idx)}')
 
-    pseudo_nl_mask = []
-    pseudo_nl_idx = []
-    nl_gt_list = []
+    if not args.no_negative_learning:
+        # select negative pseudo-labels
+        pseudo_nl_mask = []
+        pseudo_nl_idx = []
+        nl_gt_list = []
 
-    for i in range(len(idx_list)):
-        if idx_list[i] not in pseudo_idx and sum(nl_mask[i]) > 0:
-            pseudo_nl_mask.append(nl_mask[i])
-            pseudo_nl_idx.append(idx_list[i])
-            nl_gt_list.append(gt_list[i])
+        for i in range(len(idx_list)):
+            if idx_list[i] not in pseudo_idx and sum(nl_mask[i]) > 0:
+                pseudo_nl_mask.append(nl_mask[i])
+                pseudo_nl_idx.append(idx_list[i])
+                nl_gt_list.append(gt_list[i])
 
-    nl_gt_list = np.array(nl_gt_list)
-    pseudo_nl_mask = np.array(pseudo_nl_mask)
-    one_hot_targets = np.eye(args.num_classes)[nl_gt_list]
-    one_hot_targets = one_hot_targets - 1
-    one_hot_targets = np.abs(one_hot_targets)
-    flat_pseudo_nl_mask = pseudo_nl_mask.reshape(1,-1)[0]
-    flat_one_hot_targets = one_hot_targets.reshape(1,-1)[0]
-    flat_one_hot_targets = flat_one_hot_targets[np.where(flat_pseudo_nl_mask == 1)]
-    flat_pseudo_nl_mask = flat_pseudo_nl_mask[np.where(flat_pseudo_nl_mask == 1)]
+        nl_gt_list = np.array(nl_gt_list) # ground-truth, for measuring pseudo-labeling accuracy of negative examples
+        pseudo_nl_mask = np.array(pseudo_nl_mask)
+        one_hot_targets = np.eye(args.num_classes)[nl_gt_list]
+        # TODO: will catch an error here if no negative examples are selected and thus empty `nl_gt_list`
+        #       (probably some regularization is not enabled)
+        #       Fix this later
+        one_hot_targets = one_hot_targets - 1
+        one_hot_targets = np.abs(one_hot_targets)
+        flat_pseudo_nl_mask = pseudo_nl_mask.reshape(1,-1)[0]
+        flat_one_hot_targets = one_hot_targets.reshape(1,-1)[0]
+        flat_one_hot_targets = flat_one_hot_targets[np.where(flat_pseudo_nl_mask == 1)]
+        flat_pseudo_nl_mask = flat_pseudo_nl_mask[np.where(flat_pseudo_nl_mask == 1)]
 
-    nl_accuracy = (flat_pseudo_nl_mask == flat_one_hot_targets)*1
-    nl_accuracy_final = (sum(nl_accuracy)/len(nl_accuracy))*100
-    print(f'Pseudo-Labeling Accuracy (negative): {nl_accuracy_final}, Total Selected: {len(nl_accuracy)}, Unique Samples: {len(pseudo_nl_mask)}')
-    pseudo_label_dict = {'pseudo_idx': pseudo_idx.tolist(), 'pseudo_target':pseudo_target.tolist(), 'nl_idx': pseudo_nl_idx, 'nl_mask': pseudo_nl_mask.tolist()}
- 
-    return losses.avg, top1.avg, pseudo_labeling_acc, len(pseudo_idx), nl_accuracy_final, len(nl_accuracy), len(pseudo_nl_mask), pseudo_label_dict
+        nl_accuracy = (flat_pseudo_nl_mask == flat_one_hot_targets)*1
+        nl_accuracy_final = (sum(nl_accuracy)/len(nl_accuracy))*100
+        print(f'Pseudo-Labeling Accuracy (negative): {nl_accuracy_final}, Total Selected: {len(nl_accuracy)}, Unique Samples: {len(pseudo_nl_mask)}')
+
+        pseudo_label_dict = {'pseudo_idx': pseudo_idx.tolist(), 'pseudo_target':pseudo_target.tolist(), 'nl_idx': pseudo_nl_idx, 'nl_mask': pseudo_nl_mask.tolist()}
+        return losses.avg, top1.avg, pseudo_labeling_acc, len(pseudo_idx), nl_accuracy_final, len(nl_accuracy), len(pseudo_nl_mask), pseudo_label_dict
+
+    else:
+        pseudo_label_dict = {'pseudo_idx': pseudo_idx.tolist(), 'pseudo_target': pseudo_target.tolist(),
+                             'true_target': gt_target.tolist(), 'pseudo_confidence': pseudo_confidence.tolist(),
+                             'nl_idx': None, 'nl_mask': None}
+        return losses.avg, top1.avg, pseudo_labeling_acc, len(pseudo_idx), pseudo_label_dict
