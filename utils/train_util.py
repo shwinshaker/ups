@@ -113,7 +113,7 @@ def train_initial(args, train_loader, model, optimizer, scheduler, epoch, itr):
                 epochs=args.epochs,
                 batch=batch_idx + 1,
                 iter=args.iteration,
-                lr=scheduler.get_lr()[0],  #scheduler.get_last_lr()[0]
+                lr=scheduler.get_last_lr()[0], # scheduler.get_lr()[0],
                 data=data_time.avg,
                 bt=batch_time.avg,
                 loss=losses.avg))
